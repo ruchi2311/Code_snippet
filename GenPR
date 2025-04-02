@@ -1,0 +1,114 @@
+Explanation of the Three Functions:
+Each of the three functions (get_erc_prbdata_hrly, get_samsung_prbdata, and get_nokia_prbdata) is fetching PRB (Physical Resource Block) data for different vendors (Ericsson, Samsung, and Nokia) from a BigQuery database. Here's a breakdown:
+
+1. get_erc_prbdata_hrly (Ericsson PRB Data)
+Takes in start_days, elptCoreDB, enodes, spark, and markets as parameters.
+
+Converts days into a string format.
+
+Filters the query by markets (if any are provided).
+
+If enodes is None, it selects all data for a given date range.
+
+Otherwise, it applies an additional filter on ENODEB (base station) to get only relevant records.
+
+Ensures that SECTORCARRIERREF is not NULL and has trimmed values.
+
+Returns the Ericsson PRB dataset.
+
+2. get_samsung_prbdata (Samsung PRB Data)
+Similar logic to get_erc_prbdata_hrly but fetches data from a Samsung-specific table (hourly_samsung_individual_prb_noise_raw_v2).
+
+Filters by markets if provided.
+
+Checks if enodes is provided:
+
+If None, it fetches all records within the specified time range.
+
+If specified, it applies an additional filter on ENODEB.
+
+Ensures SECTORCARRIERREF is not NULL.
+
+Returns the Samsung PRB dataset.
+
+3. get_nokia_prbdata (Nokia PRB Data)
+Similar logic but fetching from a Nokia-specific table (hourly_nokia_prb_noise_raw_v2).
+
+Applies filters based on markets and enodes.
+
+Ensures SECTORCARRIERREF is not NULL.
+
+Returns the Nokia PRB dataset.
+
+Optimized Generic Function
+Instead of having separate functions for each vendor, we can create a single function that accepts the vendor name and constructs the query dynamically.
+
+python
+Copy code
+def get_prb_data(vendor, start_days, elptCoreDB, enodes=None, spark=None, markets=[]):
+    """
+    Fetch hourly PRB data for Ericsson, Samsung, or Nokia.
+
+    :param vendor: Name of the vendor ('ericsson', 'samsung', 'nokia')
+    :param start_days: Number of days to look back
+    :param elptCoreDB: Database reference
+    :param enodes: Optional list of ENODEB values to filter
+    :param spark: Spark session
+    :param markets: Optional list of market filters
+    :return: Spark DataFrame with PRB data
+    """
+    days = str(start_days)
+    
+    vendor_table_map = {
+        "ericsson": "airwave_prb_per_branch_raw_v1",
+        "samsung": "hourly_samsung_individual_prb_noise_raw_v2",
+        "nokia": "hourly_nokia_prb_noise_raw_v2"
+    }
+    
+    if vendor not in vendor_table_map:
+        raise ValueError("Invalid vendor name! Choose from 'ericsson', 'samsung', or 'nokia'.")
+
+    table_name = vendor_table_map[vendor]
+
+    market_filter = ""
+    if len(markets) > 0:
+        market_filter = " AND market in ({})".format(",".join(f"'{m}'" for m in markets))
+
+    base_query = f"""
+        SELECT * FROM `{elptCoreDB}.{table_name}`
+        WHERE SAFE.PARSE_DATE('%m/%d/%Y', day) >= SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}')
+        AND trans_dt >= date_sub(SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}'), INTERVAL {days} DAY)
+        {market_filter}
+        AND (SECTORCARRIERREF IS NOT NULL AND LENGTH(TRIM(SECTORCARRIERREF)) > 0)
+    """
+
+    if enodes:
+        enode_filter = " AND TRIM(ENODEB) IN ({})".format(",".join(f"'{e}'" for e in enodes))
+        query = base_query + enode_filter
+    else:
+        query = base_query
+
+    prb_data = spark.read.format("bigquery").load(query)
+    return prb_data
+Key Improvements:
+Removed Redundant Code: Unified logic for all vendors into a single function.
+
+Dynamic Query Construction: The function dynamically determines which table to query based on the vendor parameter.
+
+Error Handling: Ensures that an invalid vendor name doesn't cause an unexpected failure.
+
+Maintains Original Functionality: Preserves the original filtering logic for markets and enodes.
+
+Now, you can fetch PRB data for any vendor like this:
+
+python
+Copy code
+ericsson_data = get_prb_data("ericsson", start_days, elptCoreDB, enodes, spark, markets)
+samsung_data = get_prb_data("samsung", start_days, elptCoreDB, enodes, spark, markets)
+nokia_data = get_prb_data("nokia", start_days, elptCoreDB, enodes, spark, markets)
+This single function makes your code cleaner, easier to maintain, and scalable.
+
+
+
+
+
