@@ -2,133 +2,91 @@ from pyspark.sql.functions import col, lit, when, concat_ws
 import numpy as np
 import traceback
 
-def get_hot_sectors_sparkdf(vendor, startdt, enddt, coreDB, avgLevel, markets=[], spark=None, enodebs=None):
+def get_hot_sectors_sparkdf(vendor, startdt, enddt, coreDB, avgLevel, enodebs=None, markets=[], spark=None):
     """
     Unified function to process PRB data for Ericsson, Nokia, and Samsung with vendor-specific conditions.
-
-    Parameters:
-        vendor (str): 'Ericsson', 'Nokia', or 'Samsung'
-        startdt (str): Start date
-        enddt (str): End date
-        coreDB (str): Database name
-        avgLevel (float): Threshold for high interference
-        markets (list): List of markets
-        spark (SparkSession): Spark session
-        enodebs (list or None): Optional list of ENODEBs for filtering
-
-    Returns:
-        prb_data (DataFrame): Processed PRB data
-        all_prb_stats (DataFrame): PRB statistics
     """
-    
     prb_data = None  # Initialize dataset
 
-    # Vendor-specific configurations
     vendor_map = {
         "Ericsson": {
             "prefix": "eric_avg_iot_prb",
-            "table": "vz-1-nd1pr-0.vzn_nd1_elpt_core_views",
-            "invalid_condition": lambda col_val: when((col(col_val) < -30), None),  # Ericsson-specific condition
-            "has_rfbranchrx": True,
-            "fetch_function": get_erc_prbdata_hrly,  # Correct function call
-            "increment_index": False  # No index increment for Ericsson
+            "get_prb_function": get_erc_prbdata_hrly,
+            "invalid_condition": lambda col_val: when((col(col_val) < -30), None),
         },
         "Nokia": {
             "prefix": "nok_avg_iot_prb",
-            "table": "vz-1-nd1pr-0.vzn_nd1_alpt_core_views",
+            "get_prb_function": get_nokia_prbdata,
             "invalid_condition": lambda col_val: when((col(col_val) < -25) | (col(col_val) > 50), None),
-            "has_rfbranchrx": False,
-            "fetch_function": get_nokia_prbdata,  # Correct function call
-            "increment_index": True  # Nokia needs index increment
         },
         "Samsung": {
             "prefix": "sea_avg_iot_prb",
-            "table": "vz-1-nd1pr-0.vzn_nd1_alpt_core_views",
+            "get_prb_function": get_samsung_prbdata,
             "invalid_condition": lambda col_val: when((col(col_val) < -20) | (col(col_val) > 45), None),
-            "has_rfbranchrx": False,
-            "fetch_function": get_samsung_prbdata,  # Correct function call
-            "increment_index": True  # Samsung needs index increment
         }
     }
 
     if vendor not in vendor_map:
         raise ValueError("Invalid vendor. Choose from 'Ericsson', 'Nokia', or 'Samsung'.")
 
-    config = vendor_map[vendor]
+    prefix = vendor_map[vendor]["prefix"]
+    get_prb_function = vendor_map[vendor]["get_prb_function"]
+    invalid_value_handler = vendor_map[vendor]["invalid_condition"]
 
     try:
-        print(f"Fetching {vendor} PRB data...")
-        # Fetch PRB data using the correct function
-        prb_data = config["fetch_function"](startdt, coreDB, enodebs, spark, markets)
+        print(f"Fetching PRB data for {vendor}...")
+        prb_data = get_prb_function(startdt, enddt, coreDB, enodebs, spark, markets)
         prb_data = prb_data.drop_duplicates()
 
-        # Extract and sort PRB columns
-        prb_cols = [(idx, int(prb_col.split(config["prefix"])[1])) for idx, prb_col in enumerate(prb_data.columns) if config["prefix"] in prb_col]
+        prb_cols = [(idx, int(prb_col.split(prefix)[1])) for idx, prb_col in enumerate(prb_data.columns) if prefix in prb_col]
         prb_cols = np.array(prb_cols)
         sorted_prb_cols = prb_cols[np.argsort(prb_cols[:, 1]), 0]
         sorted_col_names = list(np.array(prb_data.columns)[sorted_prb_cols])
 
-        # Standardize column names with conditional index increment
         print("Standardizing columns...")
         prb_data = prb_data.select([
-            col(c).cast('float').alias(
-                '{}{}_dbm'.format(config["prefix"], int(c.split(config["prefix"])[1]) + (1 if config["increment_index"] else 0))
-            ) if c in sorted_col_names else col(c)
-            for c in prb_data.columns
-        ])
-
-        # Apply vendor-specific invalid value handling
-        print(f"Applying vendor-specific value formatting for {vendor}...")
-        prb_data = prb_data.select([
-            config["invalid_condition"](c).otherwise(col(c)).alias(c)
+            col(c).cast('float').alias('{}{}_dbm'.format(prefix, int(c.split(prefix)[1]) + (1 if vendor in ["Nokia", "Samsung"] else 0)))
             if c in sorted_col_names else col(c)
             for c in prb_data.columns
         ])
 
-        # Rename columns for consistency
-        prb_data = prb_data.withColumnRenamed('enodeb', 'ENODEB')\
-                           .withColumnRenamed('eutrancell', 'EUTRANCELL')\
+        print(f"Applying vendor-specific value formatting for {vendor}...")
+        prb_data = prb_data.select([
+            invalid_value_handler(c).otherwise(col(c)).alias(c)
+            if c in sorted_col_names else col(c)
+            for c in prb_data.columns
+        ])
+
+        prb_data = prb_data.withColumnRenamed('enodeb', 'ENODEB') \
+                           .withColumnRenamed('eutrancell', 'EUTRANCELL') \
                            .withColumnRenamed('carrier', 'CARRIER')
 
-        # Add `rfbranchrx` if missing
-        if "rfbranchrx" not in prb_data.columns:
+        if vendor != "Ericsson":
             prb_data = prb_data.withColumn('rfbranchrx', lit(1))
 
-        # Create SECTORCARRIERREF column
         prb_data = prb_data.withColumn('SECTORCARRIERREF', concat_ws('_', prb_data.EUTRANCELL, prb_data.CARRIER))
 
-        # Select relevant columns
-        selected_columns = sorted_col_names + ['ENODEB', 'SECTORCARRIERREF']
-        if config["has_rfbranchrx"]:
-            selected_columns.append('rfbranchrx')
-
+        selected_columns = sorted_col_names + ['ENODEB', 'SECTORCARRIERREF', 'rfbranchrx']
         prb_data_avg = prb_data.select(selected_columns)
 
-        # Compute aggregates
         print("Applying aggregation functions...")
-        group_cols = ['ENODEB', 'SECTORCARRIERREF']
-        if config["has_rfbranchrx"]:
-            group_cols.append('rfbranchrx')
+        avg_prb = prb_data_avg.groupBy(['ENODEB', 'SECTORCARRIERREF', 'rfbranchrx']).apply(branch_average)
+        std_prb = prb_data_avg.groupBy(['ENODEB', 'SECTORCARRIERREF', 'rfbranchrx']).apply(branch_stdev_all_dbm)
+        all_prb_stats = avg_prb.join(std_prb, on=['ENODEB', 'SECTORCARRIERREF', 'rfbranchrx'])
 
-        avg_prb = prb_data_avg.groupBy(group_cols).apply(branch_average)
-        std_prb = prb_data_avg.groupBy(group_cols).apply(branch_stdev_all_dbm)
-        all_prb_stats = avg_prb.join(std_prb, on=group_cols)
-
-        # Filter high-interference sectors
-        prb_data_avg = prb_data_avg.join(all_prb_stats, on=group_cols, how='left_anti')
-        avg_prb_all = prb_data_avg.drop('rfbranchrx' if config["has_rfbranchrx"] else 'SECTORCARRIERREF').groupBy(['ENODEB', 'SECTORCARRIERREF']).apply(seccar_average)
+        prb_data_avg = prb_data_avg.join(all_prb_stats, on=['ENODEB', 'SECTORCARRIERREF', 'rfbranchrx'], how='left_anti')
+        avg_prb_all = prb_data_avg.drop('rfbranchrx').groupBy(['ENODEB', 'SECTORCARRIERREF']).apply(seccar_average)
 
         top_interferers = avg_prb_all.filter(col("WEIGHTEDAVGRADIOINTERFERENCE") >= avgLevel)
         print(f"Found {top_interferers.count()} sectors with U1 average interference higher than {avgLevel}")
 
-        # Final join with original data
         print("Final join...")
         prb_data = prb_data.select(selected_columns).join(top_interferers, on=['ENODEB', 'SECTORCARRIERREF'])
 
         print("Unpersisting...")
 
     except Exception as e:
-        print(f"-ERROR- Could not extract {vendor} PRB data with error: {e}")
+        print(f"-ERROR- Could not extract {vendor} PRB data: {e}")
         traceback.print_exc()
 
     return prb_data, all_prb_stats
