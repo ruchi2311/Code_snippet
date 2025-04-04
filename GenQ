@@ -240,6 +240,64 @@ def get_prb_data_generic(vendor, startdt, enddt, coreDB, enodebs=None, markets=[
     
     return prb_data
 
+new4
+
+
+from pyspark.sql.functions import col, lit
+
+def get_prb_data(vendor, start_days, days, elptCoreDB, markets, spark):
+    """
+    Generic function to fetch PRB data for Ericsson, Nokia, and Samsung.
+
+    Parameters:
+        vendor (str): 'Ericsson', 'Nokia', or 'Samsung'
+        start_days (str): Start date in 'YYYY-MM-DD' format
+        days (int): Number of days for filtering
+        elptCoreDB (str): Database name
+        markets (list): List of markets
+        spark (SparkSession): Spark session instance
+
+    Returns:
+        DataFrame: PRB data for the given vendor
+    """
+    table_mapping = {
+        "Ericsson": "ericsson_table",
+        "Nokia": "nokia_table",
+        "Samsung": "samsung_table"
+    }
+    
+    if vendor not in table_mapping:
+        raise ValueError("Invalid vendor. Choose from 'Ericsson', 'Nokia', or 'Samsung'.")
+    
+    table_name = table_mapping[vendor]
+    
+    # Market filter condition
+    market_filter = ""
+    if markets:
+        market_filter = " AND market IN ({})".format(",".join(f"'{m}'" for m in markets))
+    
+    # Base query construction
+    base_query = f"""
+        SELECT *, {'SECTORCARRIERREF,' if vendor == 'Ericsson' else ''} 
+               SAFE.PARSE_DATE('%m/%d/%Y', day) AS parsed_date
+        FROM `{elptCoreDB}.{table_name}`
+        WHERE SAFE.PARSE_DATE('%m/%d/%Y', day) >= SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}')
+        AND trans_dt >= DATE_SUB(SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}'), INTERVAL {days} DAY)
+        {market_filter}
+        {'AND day != "Total"' if vendor in ['Nokia', 'Samsung'] else ''}
+    """
+    
+    print(f"Executing query for {vendor}:")
+    print(base_query)
+    
+    df = spark.sql(base_query)
+    
+    # Ensure rfbranchrx column exists for Nokia and Samsung
+    if vendor in ["Nokia", "Samsung"] and "rfbranchrx" not in df.columns:
+        df = df.withColumn("rfbranchrx", lit(1))
+    
+    return df
+
 
 
 
