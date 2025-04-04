@@ -111,4 +111,59 @@ def get_prbdata_generic(vendor, start_days, days, elptCoreDB, markets, spark):
         return None
 
 
+new2
+
+def get_prbdata_generic(vendor, start_days, days, elptCoreDB, markets, spark):
+    from pyspark.sql.functions import col, lit, concat_ws
+    import traceback
+
+    try:
+        # Table mapping per vendor
+        table_map = {
+            "Ericsson": "ericsson_hourly_prb_data",
+            "Samsung": "samsung_hourly_prb_data",
+            "Nokia": "nokia_hourly_prb_data"
+        }
+
+        table_name = table_map.get(vendor)
+        if not table_name:
+            raise ValueError("Unsupported vendor")
+
+        market_filter = ""
+        if markets:
+            market_filter = " AND market in ({})".format(",".join(f"'{m}'" for m in markets))
+
+        day_filter = " AND day != 'Total'" if vendor in ["Samsung", "Nokia"] else ""
+
+        base_query = f"""
+            SELECT *, {'SECTORCARRIERREF,' if vendor == 'Ericsson' else ''} 
+                   SAFE.PARSE_DATE('%m/%d/%Y', day) AS parsed_date
+            FROM `{elptCoreDB}.{table_name}`
+            WHERE SAFE.PARSE_DATE('%m/%d/%Y', day) >= SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}')
+            AND trans_dt >= date_sub(SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}'), INTERVAL {days} DAY)
+            {market_filter}
+            {day_filter}
+        """
+
+        print(f"Running query for {vendor}: {base_query}")
+        df = spark.sql(base_query)
+
+        # If SECTORCARRIERREF is not present (Samsung/Nokia), create it
+        if 'SECTORCARRIERREF' not in df.columns:
+            df = df.withColumn('SECTORCARRIERREF', concat_ws('_', col('eutrancell'), col('carrier')))
+
+        # Ensure rfbranchrx column exists
+        if 'rfbranchrx' not in df.columns:
+            df = df.withColumn('rfbranchrx', lit(1))
+
+        return df
+
+    except Exception as e:
+        print(f"Failed to fetch PRB data for {vendor}: {e}")
+        traceback.print_exc()
+        return None
+
+
+
+
 
