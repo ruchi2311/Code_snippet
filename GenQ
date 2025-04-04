@@ -164,6 +164,83 @@ def get_prbdata_generic(vendor, start_days, days, elptCoreDB, markets, spark):
         return None
 
 
+new3 
+
+from pyspark.sql.functions import col, lit, when, concat_ws
+
+def get_prb_data_generic(vendor, startdt, enddt, coreDB, enodebs=None, markets=[], spark=None):
+    """
+    Generic function to fetch and process PRB data for Ericsson, Nokia, and Samsung.
+    """
+    vendor_map = {
+        "Ericsson": {
+            "table_name": "ericsson_prb_table",
+            "prefix": "eric_avg_iot_prb",
+            "invalid_condition": lambda col_val: when((col(col_val) < -30), None),
+            "has_sectorcarrierref": True
+        },
+        "Nokia": {
+            "table_name": "nokia_prb_table",
+            "prefix": "nok_avg_iot_prb",
+            "invalid_condition": lambda col_val: when((col(col_val) < -25) | (col(col_val) > 50), None),
+            "has_sectorcarrierref": False
+        },
+        "Samsung": {
+            "table_name": "samsung_prb_table",
+            "prefix": "sea_avg_iot_prb",
+            "invalid_condition": lambda col_val: when((col(col_val) < -20) | (col(col_val) > 45), None),
+            "has_sectorcarrierref": False
+        }
+    }
+    
+    if vendor not in vendor_map:
+        raise ValueError("Invalid vendor. Choose from 'Ericsson', 'Nokia', or 'Samsung'.")
+    
+    config = vendor_map[vendor]
+    table_name = config["table_name"]
+    prefix = config["prefix"]
+    invalid_value_handler = config["invalid_condition"]
+    has_sectorcarrierref = config["has_sectorcarrierref"]
+    
+    market_filter = "" if not markets else " AND market in ({})".format(",".join(f"'{m}'" for m in markets))
+    
+    base_query = f"""
+        SELECT *, {'SECTORCARRIERREF,' if has_sectorcarrierref else ''} 
+               SAFE.PARSE_DATE('%m/%d/%Y', day) AS parsed_date
+        FROM `{coreDB}.{table_name}`
+        WHERE SAFE.PARSE_DATE('%m/%d/%Y', day) >= SAFE.PARSE_DATE('%Y-%m-%d', '{startdt}')
+        AND trans_dt >= DATE_SUB(SAFE.PARSE_DATE('%Y-%m-%d', '{startdt}'), INTERVAL 7 DAY)
+        {market_filter}
+        {'AND day != \'Total\'' if vendor in ['Nokia', 'Samsung'] else ''}
+    """
+    
+    prb_data = spark.sql(base_query)
+    prb_data = prb_data.dropDuplicates()
+    
+    # Ensure rfbranchrx column exists for Nokia and Samsung
+    if not has_sectorcarrierref:
+        prb_data = prb_data.withColumn('rfbranchrx', lit(1))
+    
+    # Standardize column names
+    prb_cols = [c for c in prb_data.columns if prefix in c]
+    prb_data = prb_data.select([
+        col(c).cast('float').alias(f"{prefix}{int(c.split(prefix)[1])}") if c in prb_cols else col(c)
+        for c in prb_data.columns
+    ])
+    
+    # Apply invalid value filtering
+    prb_data = prb_data.select([
+        invalid_value_handler(c).otherwise(col(c)).alias(c) if c in prb_cols else col(c)
+        for c in prb_data.columns
+    ])
+    
+    # Create SECTORCARRIERREF for Ericsson only
+    if has_sectorcarrierref:
+        prb_data = prb_data.withColumn('SECTORCARRIERREF', concat_ws('_', prb_data.EUTRANCELL, prb_data.CARRIER))
+    
+    return prb_data
+
+
 
 
 
