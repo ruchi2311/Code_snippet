@@ -1,145 +1,114 @@
-Breaking Down Each Part
-1. SELECT * FROM {elptCoreDB}.{table_name}
-This statement retrieves all columns (*) from the table located in BigQuery.
+from pyspark.sql.functions import lit
 
-{elptCoreDB}: Placeholder for the database name.
+def get_prb_data(vendor, start_days, elptCoreDB, enodes=None, spark=None, markets=[]):
+    """
+    Fetch hourly PRB data for Ericsson, Samsung, or Nokia.
 
-{table_name}: Placeholder for the table name (Ericsson, Samsung, or Nokia PRB data).
+    :param vendor: Name of the vendor ('ericsson', 'samsung', 'nokia')
+    :param start_days: Number of days to look back
+    :param elptCoreDB: Database reference
+    :param enodes: Optional list of ENODEB values to filter
+    :param spark: Spark session
+    :param markets: Optional list of market filters
+    :return: Spark DataFrame with PRB data
+    """
+    days = str(start_days)
+    
+    # Mapping vendors to table names
+    vendor_table_map = {
+        "ericsson": "airwave_prb_per_branch_raw_v1",
+        "samsung": "hourly_samsung_individual_prb_noise_raw_v2",
+        "nokia": "hourly_nokia_prb_noise_raw_v2"
+    }
+    
+    if vendor not in vendor_table_map:
+        raise ValueError("Invalid vendor name! Choose from 'ericsson', 'samsung', or 'nokia'.")
 
-The backticks ( ) are used because BigQuery requires them for table references with special characters.
+    table_name = vendor_table_map[vendor]
 
-2. SAFE.PARSE_DATE('%m/%d/%Y', day)
-Purpose:
-Converts the day column (which is likely stored as a string in the format MM/DD/YYYY) into a proper DATE type.
+    market_filter = ""
+    if len(markets) > 0:
+        market_filter = " AND market in ({})".format(",".join(f"'{m}'" for m in markets))
 
-Why Use SAFE.PARSE_DATE Instead of PARSE_DATE?
-PARSE_DATE('%m/%d/%Y', day) fails if day contains invalid data.
+    # Base query (Ericsson has SECTORCARRIERREF, others do not)
+    base_query = f"""
+        SELECT *, {'SECTORCARRIERREF,' if vendor == 'ericsson' else ''} 
+               SAFE.PARSE_DATE('%m/%d/%Y', day) AS parsed_date
+        FROM `{elptCoreDB}.{table_name}`
+        WHERE SAFE.PARSE_DATE('%m/%d/%Y', day) >= SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}')
+        AND trans_dt >= date_sub(SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}'), INTERVAL {days} DAY)
+        {market_filter}
+    """
 
-SAFE.PARSE_DATE('%m/%d/%Y', day) returns NULL instead of failing if the input is invalid.
+    if vendor == "ericsson":
+        # Ensure SECTORCARRIERREF is present and not null
+        base_query += " AND (SECTORCARRIERREF IS NOT NULL AND LENGTH(TRIM(SECTORCARRIERREF)) > 0)"
 
-This makes the query more robust and error-tolerant.
+    if enodes:
+        enode_filter = " AND TRIM(ENODEB) IN ({})".format(",".join(f"'{e}'" for e in enodes))
+        query = base_query + enode_filter
+    else:
+        query = base_query
 
-Example:
-sql
-Copy code
-SELECT SAFE.PARSE_DATE('%m/%d/%Y', '03/29/2024')
--- Output: 2024-03-29
-3. SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}')
-Purpose:
-Converts {start_days} (which is expected to be in YYYY-MM-DD format) into a proper DATE.
+    prb_data = spark.read.format("bigquery").load(query)
 
-Example:
-sql
-Copy code
-SELECT SAFE.PARSE_DATE('%Y-%m-%d', '2024-03-29')
--- Output: 2024-03-29
-4. WHERE SAFE.PARSE_DATE('%m/%d/%Y', day) >= SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}')
-Purpose:
-Filters records where the day column is greater than or equal to the start_days value.
+    # If vendor is NOT Ericsson, add SECTORCARRIERREF with a default value
+    if vendor in ["samsung", "nokia"]:
+        prb_data = prb_data.withColumn("SECTORCARRIERREF", lit(1))
 
-Example:
-If start_days = '2024-03-29', the condition will filter out rows where:
+    return prb_data
 
-plaintext
-Copy code
-day >= 2024-03-29
-5. AND trans_dt >= date_sub(SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}'), INTERVAL {days} DAY)
-Function Breakdown:
-SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}'): Converts {start_days} into a DATE.
 
-date_sub(..., INTERVAL {days} DAY):
+new 
+def get_prbdata_generic(vendor, start_days, days, elptCoreDB, markets, spark):
+    from pyspark.sql.functions import col, lit, concat_ws
+    import traceback
 
-Subtracts {days} number of days from {start_days}.
+    try:
+        # Table mapping per vendor
+        table_map = {
+            "Ericsson": "ericsson_hourly_prb_data",
+            "Samsung": "samsung_hourly_prb_data",
+            "Nokia": "nokia_hourly_prb_data"
+        }
 
-Example:
-If:
+        table_name = table_map.get(vendor)
+        if not table_name:
+            raise ValueError("Unsupported vendor")
 
-{start_days} = '2024-03-29'
+        market_filter = ""
+        if markets:
+            market_filter = " AND market in ({})".format(",".join(f"'{m}'" for m in markets))
 
-{days} = 7
+        day_filter = " AND day != 'Total'" if vendor in ["Samsung", "Nokia"] else ""
 
-Then:
+        base_query = f"""
+            SELECT *, {'SECTORCARRIERREF,' if vendor == 'Ericsson' else ''} 
+                   SAFE.PARSE_DATE('%m/%d/%Y', day) AS parsed_date
+            FROM `{elptCoreDB}.{table_name}`
+            WHERE SAFE.PARSE_DATE('%m/%d/%Y', day) >= SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}')
+            AND trans_dt >= date_sub(SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}'), INTERVAL {days} DAY)
+            {market_filter}
+            {day_filter}
+        """
 
-sql
-Copy code
-date_sub(SAFE.PARSE_DATE('%Y-%m-%d', '2024-03-29'), INTERVAL 7 DAY)
-Results in: 2024-03-22
+        print(f"Running query for {vendor}: {base_query}")
+        df = spark.sql(base_query)
 
-Final Condition:
-sql
-Copy code
-trans_dt >= 2024-03-22
-This ensures that we only fetch records with trans_dt within the last {days} days.
+        # If SECTORCARRIERREF is not present (Samsung/Nokia), create it
+        if 'SECTORCARRIERREF' not in df.columns:
+            df = df.withColumn('SECTORCARRIERREF', concat_ws('_', col('eutrancell'), col('carrier')))
 
-6. {market_filter}
-Purpose:
-This is a dynamically generated filter for the market column.
+        # Ensure rfbranchrx column exists
+        if 'rfbranchrx' not in df.columns:
+            df = df.withColumn('rfbranchrx', lit(1))
 
-If markets is provided as a list (['market1', 'market2']), market_filter becomes:
+        return df
 
-sql
-Copy code
-AND market IN ('market1', 'market2')
-If markets is empty, market_filter is an empty string, so no filtering occurs.
+    except Exception as e:
+        print(f"Failed to fetch PRB data for {vendor}: {e}")
+        traceback.print_exc()
+        return None
 
-Example:
-If markets = ['NewYork', 'LosAngeles'], then:
 
-sql
-Copy code
-market_filter = " AND market IN ('NewYork', 'LosAngeles')"
-7. AND (SECTORCARRIERREF IS NOT NULL AND LENGTH(TRIM(SECTORCARRIERREF)) > 0)
-Purpose:
-Ensures that SECTORCARRIERREF is not null and not empty.
 
-Function Breakdown:
-IS NOT NULL: Ensures SECTORCARRIERREF is not null.
-
-TRIM(SECTORCARRIERREF): Removes leading and trailing spaces.
-
-LENGTH(...) > 0: Ensures SECTORCARRIERREF is not an empty string after trimming.
-
-Example:
-SECTORCARRIERREF	Trimmed Value	Condition Result
-NULL	NULL	Filtered Out
-' ' (spaces)	''	Filtered Out
-'SC123'	'SC123'	Included
-Final Query Example
-If:
-
-elptCoreDB = "network_database"
-
-table_name = "hourly_prb_data"
-
-start_days = '2024-03-29'
-
-days = 7
-
-markets = ['NewYork', 'LosAngeles']
-
-Then, the query will look like this:
-
-sql
-Copy code
-SELECT * FROM `network_database.hourly_prb_data`
-WHERE SAFE.PARSE_DATE('%m/%d/%Y', day) >= SAFE.PARSE_DATE('%Y-%m-%d', '2024-03-29')
-AND trans_dt >= date_sub(SAFE.PARSE_DATE('%Y-%m-%d', '2024-03-29'), INTERVAL 7 DAY)
-AND market IN ('NewYork', 'LosAngeles')
-AND (SECTORCARRIERREF IS NOT NULL AND LENGTH(TRIM(SECTORCARRIERREF)) > 0)
-Summary of Functions Used
-Function	Purpose
-SAFE.PARSE_DATE(format, column)	Converts a string to a date, safely handling errors.
-date_sub(date, INTERVAL n DAY)	Subtracts n days from a date.
-IS NOT NULL	Ensures a column has non-null values.
-TRIM(column)	Removes leading and trailing spaces.
-LENGTH(column) > 0	Ensures the column is not an empty string.
-Key Takeaways
-Handles different date formats safely using SAFE.PARSE_DATE.
-
-Filters data based on a given date range using date_sub.
-
-Dynamically adds market filtering based on user input.
-
-Ensures essential columns (SECTORCARRIERREF) are valid by checking for nulls and empty values.
-
-This query is optimized to work across Ericsson, Samsung, and Nokia PRB data, making it reusable in different scenarios.
