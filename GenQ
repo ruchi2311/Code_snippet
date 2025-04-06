@@ -428,6 +428,72 @@ def get_prb_data(vendor, start_days, elptCoreDB, enodes=None, spark=None, market
 
     return prb_data
 
+new7
+
+from pyspark.sql.functions import lit
+
+def get_prb_data(vendor, start_days, elptCoreDB, enodes=None, spark=None, markets=[]):
+    """
+    Fetch hourly PRB data for Ericsson, Samsung, or Nokia.
+
+    :param vendor: Name of the vendor ('ericsson', 'samsung', 'nokia')
+    :param start_days: Number of days to look back
+    :param elptCoreDB: Database reference
+    :param enodes: Optional list of ENODEB values to filter
+    :param spark: Spark session
+    :param markets: Optional list of market filters
+    :return: Spark DataFrame with PRB data
+    """
+    days = str(start_days)
+
+    vendor_table_map = {
+        "ericsson": "airwave_prb_per_branch_raw_v1",
+        "samsung": "hourly_samsung_individual_prb_noise_raw_v2",
+        "nokia": "hourly_nokia_prb_noise_raw_v2"
+    }
+
+    if vendor not in vendor_table_map:
+        raise ValueError("Invalid vendor name! Choose from 'ericsson', 'samsung', or 'nokia'.")
+
+    table_name = vendor_table_map[vendor]
+
+    # Market filter
+    market_filter = ""
+    if markets:
+        market_filter = " AND market IN ({})".format(",".join(f"'{m}'" for m in markets))
+
+    # Base query (no extra parsed_date in SELECT)
+    base_query = f"""
+        SELECT * 
+        FROM `{elptCoreDB}.{table_name}`
+        WHERE SAFE.PARSE_DATE('%m/%d/%Y', day) >= SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}')
+        AND trans_dt >= DATE_SUB(SAFE.PARSE_DATE('%Y-%m-%d', '{start_days}'), INTERVAL {days} DAY)
+        {market_filter}
+    """
+
+    # Apply 'day != Total' condition for Samsung and Nokia
+    if vendor in ["samsung", "nokia"]:
+        base_query += " AND day != 'Total'"
+
+    # ENODEB filter
+    if enodes:
+        enode_filter = " AND TRIM(ENODEB) IN ({})".format(",".join(f"'{e}'" for e in enodes))
+        base_query += enode_filter
+
+    # Load DataFrame
+    prb_data = spark.read.format("bigquery").load(base_query)
+
+    # Ensure `rfbranchrx` column exists for Samsung & Nokia
+    if vendor in ["samsung", "nokia"] and "rfbranchrx" not in prb_data.columns:
+        prb_data = prb_data.withColumn("rfbranchrx", lit(1))
+
+    # Ensure `SECTORCARRIERREF` exists for Samsung & Nokia
+    if vendor in ["samsung", "nokia"] and "SECTORCARRIERREF" not in prb_data.columns:
+        prb_data = prb_data.withColumn("SECTORCARRIERREF", lit(None))
+
+    return prb_data
+
+
 
 
 
