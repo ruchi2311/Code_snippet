@@ -1,0 +1,51 @@
+from pyspark.sql.functions import col, lit
+
+def get_narrowband_sectors(prb_vision_start, prb_vision_end, alptCoreDB, elptCoreDB, interf_level, sam_data_present, spark, markets=[]):
+    sam_sectors = None
+
+    if sam_data_present:
+        sam_sectors = get_hot_samsung_sectors_sparkdf(prb_vision_start, prb_vision_end, alptCoreDB, interf_level, markets)
+        broken_sam = get_hot_samsung_sectors_sparkdf(prb_vision_start, prb_vision_end, elptCoreDB, interf_level, markets)
+    else:
+        broken_sam = spark.createDataFrame([], get_hot_samsung_sectors_sparkdf.schema)  # or use an empty DataFrame with same schema
+
+    broken_nok = get_hot_nokia_sectors_sparkdf(prb_vision_start, prb_vision_end, alptCoreDB, interf_level, markets)
+    broken_eric = get_hot_ericsson_sectors_sparkdf(prb_vision_start, prb_vision_end, elptCoreDB, interf_level, markets)
+
+    broken_branches = broken_sam.union(broken_nok).union(broken_eric)
+
+    # Add VENDOR column for each and union
+    eric_sectors = broken_eric.withColumn("VENDOR", lit("Ericsson"))
+    vendor_sectors = [eric_sectors]
+
+    if sam_data_present:
+        sam_sectors = sam_sectors.withColumn("VENDOR", lit("Samsung")).withColumn("rfbranchrx", lit(1))
+        vendor_sectors.append(sam_sectors)
+
+    nok_sectors = broken_nok.withColumn("VENDOR", lit("Nokia"))
+    vendor_sectors.append(nok_sectors)
+
+    # Union all vendor sectors
+    all_sectors = vendor_sectors[0]
+    for sect in vendor_sectors[1:]:
+        all_sectors = all_sectors.union(sect)
+
+    all_sectors = all_sectors.withColumn("day_copy", col("day")) \
+                             .withColumn("hr", col("hr")) \
+                             .dropDuplicates(subset=["ENODEB", "SECTORCARRIERREF"])
+
+    # Scoring
+    sector_ref_copy = all_sectors.select("branchrx", "day", "hr").withColumnRenamed("branchrx", "secbranchrx")
+    df_predictions = all_sectors.drop("day_copy", "SECTORCARRIERREF", "VENDOR") \
+        .join(sector_ref_copy, on=["ENODEB", "hr", "day"]) \
+        .applyInPandas(create_and_score_prb_image, schema=narrowband_schema)
+
+    # Efficient casting
+    cols_to_cast = ["nb", "nb_count", "hr", "nb_hour", "nb_pred"]
+    for col_name in cols_to_cast:
+        df_predictions = df_predictions.withColumn(col_name, col(col_name).cast("int"))
+
+    df_predictions = df_predictions.orderBy("SECTORCARRIERREF", "ENODEB", "end_hour", "nb_count", ascending=False) \
+                                   .dropDuplicates(subset=["ENODEB", "SECTORCARRIERREF", "VENDOR", "day", "hr"])
+
+    return all_sectors, df_predictions, broken_branches
