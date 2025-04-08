@@ -62,3 +62,54 @@ df_predictions = (
     .select("SECTORCARRIERREF", "ENODEB", "start_hour", "end_hour", "start_prb", "end_prb", "nb", "nb_count")
     .dropDuplicates(["ENODEB", "SECTORCARRIERREF", "VENDOR", "start_hour", "end_hour", "start_prb", "end_prb", "nb"])
 )
+
+new 
+
+# Line 275 onward — keep logic same, just optimize structure
+
+if sam_sectors is not None:
+    sam_sectors = sam_sectors.withColumn("VENDOR", lit("Samsung")) \
+                             .withColumn("frbbranchr", lit(""))
+
+    nok_sectors = nok_sectors.withColumn("VENDOR", lit("Nokia")) \
+                             .withColumn("frbbranchr", lit(""))
+
+    all_sectors = nok_sectors.select(erc_cols).union(sam_sectors.select(erc_cols)).union(all_sectors)
+
+all_sectors = all_sectors.cache()
+
+# Add helper columns
+all_sectors = all_sectors.withColumns({
+    "day_copy": col("day"),
+    "seccarr_ref_copy": col("SECTORCARRIERREF")
+})
+
+# Drop duplicates and unnecessary column before scoring
+all_sectors = all_sectors.dropDuplicates(["ENODEB", "SECTORCARRIERREF", "VENDOR", "frbbranchr", "day", "hr"]) \
+                         .drop("WEIGHTEDAVGRADIOINTERFERENCE")
+
+# Score using pandas UDF
+df_predictions = all_sectors.groupby("day_copy", "VENDOR", "frbbranchr", "seccarr_ref_copy") \
+                            .applyInPandas(create_and_score_prb_image, schema=narrowband_schema)
+
+# Filter for nb == 'True' and cast types
+df_predictions = df_predictions.filter(col("nb") == "True") \
+    .withColumn("nb_count", col("nb_count").cast("int")) \
+    .withColumn("start_hour", col("start_hour").cast("int")) \
+    .withColumn("end_hour", col("end_hour").cast("int")) \
+    .withColumn("start_prb", col("start_prb").cast("int")) \
+    .withColumn("end_prb", col("end_prb").cast("int"))
+
+# Final formatting and deduplication
+df_predictions = df_predictions.select(
+    "SECTORCARRIERREF", "ENODEB", "start_hour", "end_hour",
+    "start_prb", "end_prb", "nb", "nb_count"
+).orderBy("start_hour", "end_hour", "start_prb", "end_prb", ascending=False) \
+ .dropDuplicates(["ENODEB", "SECTORCARRIERREF", "VENDOR"])
+
+# Drop temporary columns from all_sectors
+all_sectors = all_sectors.drop("day_copy", "seccarr_ref_copy")
+
+# Return final results
+return all_sectors, df_predictions, broken_branches
+
