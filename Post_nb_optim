@@ -49,3 +49,16 @@ def get_narrowband_sectors(prb_vision_start, prb_vision_end, alptCoreDB, elptCor
                                    .dropDuplicates(subset=["ENODEB", "SECTORCARRIERREF", "VENDOR", "day", "hr"])
 
     return all_sectors, df_predictions, broken_branches
+
+
+df_predictions = (
+    df_predictions
+    .withColumn("nb", col("nb") == "True")  # original logic: create boolean column
+    .withColumn("start_hour", col("start_hour").cast("int"))
+    .withColumn("end_hour", col("end_hour").cast("int"))
+    .withColumn("start_prb", col("start_prb").cast("int"))
+    .withColumn("end_prb", col("end_prb").cast("int"))
+    .withColumn("nb_count", col("nb_count").cast("int"))
+    .select("SECTORCARRIERREF", "ENODEB", "start_hour", "end_hour", "start_prb", "end_prb", "nb", "nb_count")
+    .dropDuplicates(["ENODEB", "SECTORCARRIERREF", "VENDOR", "start_hour", "end_hour", "start_prb", "end_prb", "nb"])
+)
