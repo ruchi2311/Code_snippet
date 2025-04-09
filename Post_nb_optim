@@ -161,4 +161,38 @@ df_hourly_prb = df_hourly_prb \
 # Drop nulls from main dataframe
 df_hrly_interference_all = df_hrly_interference_all.na.drop(subset=["EUTRANCELL", "CARRIER"])
 
+# Atoll data join
+df_hrly_interference_all = df_hrly_interference_all.join(
+    tb,
+    (df_hrly_interference_all.ENODEB == tb.ENODEB_P) &
+    (df_hrly_interference_all.EUTRANCELL == tb.SECTOR_P) &
+    (df_hrly_interference_all.CARRIER == tb.CARRIER_P),
+    how="left"
+).drop("ENODEB_P", "SECTOR_P", "CARRIER_P")
+
+# Filter weak interference
+df_hrly_interference_all = df_hrly_interference_all.filter(
+    col("WEIGHTEDAVGROIDINTERFERENCE").between(-140, -110)
+)
+
+# Vendor filter
+vendor_condition = col("Vendor").isin("Samsung", "Nokia")
+df_hrly_interference_all = df_hrly_interference_all.filter(vendor_condition)
+
+# Optional PIM filter
+# df_hrly_interference_all = df_hrly_interference_all.filter(
+#     (col("Vendor") == "Ericsson") & (col("PIM_MAX").isNull())
+# )
+
+# Neighbor + freq join helpers
+def join_with_neighbors(df_cr, get_neighbors_fn, get_freq_fn, spark, key_cols):
+    neighbors = get_neighbors_fn(spark).dropDuplicates(key_cols)
+    freq = get_freq_fn(spark).dropDuplicates(key_cols)
+    return df_cr.join(neighbors, on=key_cols, how="left_semi") \
+                .join(freq, on=key_cols, how="left_semi")
+
+sam = join_with_neighbors(df_cr, get_cell_relation_samsung, get_freq_data_samsung, spark, ["EUTRANCELL"])
+nokia = join_with_neighbors(df_cr, get_cell_relation_nokia, get_freq_data_nokia, spark, ["EUTRANCELL"])
+
+
 
