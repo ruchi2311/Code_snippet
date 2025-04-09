@@ -267,4 +267,16 @@ window = Window.partitionBy("ENODEB", "EUTRANCELL", "CARRIER").orderBy("HOA_NB")
 
 df_cr = df_cr.withColumn("rank", rank().over(window)).filter(col("rank") <= 30)
 
+# Create a dataframe of master enodeb sector carriers with interference – needed to filter PRB values
+df_intf = df_cr.select("ENODEB", "EUTRANCELL", "CARRIER").dropDuplicates()
+
+# Filter hourly PRB data using the interference dataframe
+df_hourly_prb = (
+    df_hourly_prb
+    .join(df_intf, on=["ENODEB", "EUTRANCELL", "CARRIER"], how="left_semi")
+    .drop("SECTORCARRIERREF", "trans_dt", "day_copy", "WEIGHTEDAVGRADIOINTERFERENCE")
+)
+
+
+
 
