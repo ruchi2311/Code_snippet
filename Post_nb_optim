@@ -113,3 +113,19 @@ all_sectors = all_sectors.drop("day_copy", "seccarr_ref_copy")
 # Return final results
 return all_sectors, df_predictions, broken_branches
 
+new opt
+
+sc = get_sectorcarrierref(date, epltCoreDB, spark).alias("sc")
+
+# Define join condition for readability
+join_cond = [
+    df_hrly_interference_all["ENODEB"] == sc["ENODEB"],
+    df_hrly_interference_all["SECTORCARRIERREF"] == sc["SECTORCARRIERREF"]
+]
+
+df_hrly_interference_all = df_hrly_interference_all \
+    .join(sc, join_cond, how='left') \
+    .withColumnRenamed("SECTOR", "EUTRANCELL") \
+    .drop(*["ENODEB", "SECTORCARRIERREF", "DAY"])
+
+
