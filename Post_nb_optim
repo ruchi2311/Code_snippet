@@ -138,3 +138,27 @@ df_hrly_interference_all = df_hrly_interference_all \
     .withColumn("EUTRANCELL", when(vendor_condition, split_col[0]).otherwise(col("EUTRANCELL"))) \
     .withColumn("CARRIER", when(vendor_condition, split_col[1]).otherwise(col("CARRIER")))
 
+
+from pyspark.sql.functions import col, split, when
+
+# Join with renamed column and drop unneeded columns
+df_hourly_prb = df_hourly_prb.join(
+    sc, 
+    (df_hourly_prb["ENODEB"] == sc["ENODEB"]) & 
+    (df_hourly_prb["SECTORCARRIERREF"] == sc["SECTORCARRIERREF"]), 
+    how='left'
+).withColumnRenamed("SECTOR", "EUTRANCELL") \
+ .drop(sc["ENODEB"], sc["SECTORCARRIERREF"], sc["DAY"])
+
+# Prepare transformation for Samsung/Nokia rows
+vendor_condition = col("Vendor").isin("Samsung", "Nokia")
+split_col = split(col("SECTORCARRIERREF"), "-")
+
+df_hourly_prb = df_hourly_prb \
+    .withColumn("EUTRANCELL", when(vendor_condition, split_col[0]).otherwise(col("EUTRANCELL"))) \
+    .withColumn("CARRIER", when(vendor_condition, split_col[1]).otherwise(col("CARRIER")))
+
+# Drop nulls from main dataframe
+df_hrly_interference_all = df_hrly_interference_all.na.drop(subset=["EUTRANCELL", "CARRIER"])
+
+
