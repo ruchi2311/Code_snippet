@@ -260,5 +260,11 @@ for i in range(1, 101):
 df_max_prbs = df_max_prbs.filter(col("key_avg") >= -110)
 
 
+from pyspark.sql.window import Window
+from pyspark.sql.functions import rank
+
+window = Window.partitionBy("ENODEB", "EUTRANCELL", "CARRIER").orderBy("HOA_NB")
+
+df_cr = df_cr.withColumn("rank", rank().over(window)).filter(col("rank") <= 30)
 
 
