@@ -194,5 +194,71 @@ def join_with_neighbors(df_cr, get_neighbors_fn, get_freq_fn, spark, key_cols):
 sam = join_with_neighbors(df_cr, get_cell_relation_samsung, get_freq_data_samsung, spark, ["EUTRANCELL"])
 nokia = join_with_neighbors(df_cr, get_cell_relation_nokia, get_freq_data_nokia, spark, ["EUTRANCELL"])
 
+nw
+
+# Add LTECELLID column based on sector + carrier values – needed for receiving PRB data
+df_cr = df_cr.withColumn(
+    "LTECELLID",
+    when(
+        col("CARRIER") == '1',
+        (col("EUTRANCELL").cast("int") + lit(0)).cast("string")
+    ).otherwise(col("EUTRANCELL").cast("string"))
+)
+
+# Create a dataframe of master enodeb sector carriers with interference – needed to filter PRB values
+df_intf = df_cr.select("ENODEB", "EUTRANCELL", "CARRIER").dropDuplicates()
+
+# Join hourly PRB with interference dataframe
+df_hourly_prb_join = (
+    df_hourly_prb
+    .join(df_intf, 
+          (df_hourly_prb.ENODEB == df_intf.ENODEB) &
+          (df_hourly_prb.EUTRANCELL == df_intf.EUTRANCELL) &
+          (df_hourly_prb.CARRIER == df_intf.CARRIER),
+          "inner")
+)
+
+# Drop unwanted columns and rename for clarity
+df_hourly_prb = (
+    df_hourly_prb_join
+    .drop("SECTORCARRIERREF", "trans_dt")
+    .withColumnRenamed("day_copy", "WEIGHTEDAVGGRADATIONINTERFERENCE")
+)
+
+# Calculate PRB daily average dBm
+df_prb_avg_dBm = calc_prb_avg_dBm(df_hourly_prb)
+
+# Calculate PRB daily count
+df_prb_count = calc_prb_daily_count(df_hourly_prb)
+
+# Join max PRBs
+df_max_prbs = df_max_prbs.join(df_prb_avg_dBm, on=["ENODEB", "EUTRANCELL", "CARRIER", "VENDOR"])
+
+# Reorder columns
+df_max_prbs = df_max_prbs.orderBy("ENODEB")
+
+# Extract relevant PRB columns
+cols = [col for col in df_max_prbs.columns if "radiocenterfprwprbprb" in col]
+
+# Create key_avg column
+df_max_prbs = df_max_prbs.withColumn(
+    "key_avg",
+    F.coalesce(
+        *[F.when(
+            df_max_prbs.key == c.split("_")[0].split("prb")[1], 
+            df_max_prbs[c]
+        ) for c in cols]
+    )
+)
+
+# Loop to drop unused columns
+base = "radiocenterfprwprbprb"
+for i in range(1, 101):
+    df_max_prbs = df_max_prbs.drop(f"{base}{i}_dBm")
+
+# Select only macro sectors whose avg is >= -110
+df_max_prbs = df_max_prbs.filter(col("key_avg") >= -110)
+
+
 
 
