@@ -129,3 +129,12 @@ df_hrly_interference_all = df_hrly_interference_all \
     .drop(*["ENODEB", "SECTORCARRIERREF", "DAY"])
 
 
+from pyspark.sql.functions import col, split, when
+
+vendor_condition = col("Vendor").isin("Samsung", "Nokia")
+split_col = split(col("SECTORCARRIERREF"), "-")
+
+df_hrly_interference_all = df_hrly_interference_all \
+    .withColumn("EUTRANCELL", when(vendor_condition, split_col[0]).otherwise(col("EUTRANCELL"))) \
+    .withColumn("CARRIER", when(vendor_condition, split_col[1]).otherwise(col("CARRIER")))
+
